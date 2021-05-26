@@ -8,6 +8,7 @@ class AP_MotorsUGV {
 public:
     // Constructor
     AP_MotorsUGV(AP_ServoRelayEvents &relayEvents);
+    float PI = 3.14159265;
 
     enum pwm_type {
         PWM_TYPE_NORMAL = 0,
@@ -138,6 +139,9 @@ protected:
     // add omni motor using separate throttle, steering and lateral factors
     void add_omni_motor(int8_t motor_num, float throttle_factor, float steering_factor, float lateral_factor);
 
+    // add omni motor using separate throttle, steering and lateral factors
+    void add_ballbot_motor(int8_t motor_num, int angle_from_forward);
+
     // add a motor and set up output function
     void add_omni_motor_num(int8_t motor_num);
 
@@ -152,6 +156,12 @@ protected:
 
     // output for omni motors
     void output_omni(bool armed, float steering, float throttle, float lateral);
+
+    // output for ballbot omni frame
+    void output_ballbot(bool armed, float throttle, float longitudinal, float lateral);
+
+    // set limits based on throttle, long and lat
+    void set_limits_from_input_ballbot(bool armed, float throttle);
 
     // output throttle (-100 ~ +100) to a throttle channel.  Sets relays if required
     // dt is the main loop time interval and is required when rate control is required
@@ -209,5 +219,10 @@ protected:
     float   _throttle_factor[AP_MOTORS_NUM_MOTORS_MAX];
     float   _steering_factor[AP_MOTORS_NUM_MOTORS_MAX];
     float   _lateral_factor[AP_MOTORS_NUM_MOTORS_MAX];
+    float   _longitudinal_factor[AP_MOTORS_NUM_MOTORS_MAX];
+    int   _motor_angle[AP_MOTORS_NUM_MOTORS_MAX];
     uint8_t   _motors_num;
+    uint8_t counter;
+    uint8_t counter2;
+
 };

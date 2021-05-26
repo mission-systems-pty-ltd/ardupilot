@@ -16,6 +16,7 @@
 #include "SRV_Channel/SRV_Channel.h"
 #include "AP_MotorsUGV.h"
 #include "Rover.h"
+#include <GCS_MAVLink/GCS.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -116,6 +117,8 @@ AP_MotorsUGV::AP_MotorsUGV(AP_ServoRelayEvents &relayEvents) :
 
 void AP_MotorsUGV::init()
 {
+    counter = 0;
+
     // setup servo output
     setup_servo_output();
 
@@ -302,7 +305,20 @@ void AP_MotorsUGV::output(bool armed, float ground_speed, float dt)
     output_skid_steering(armed, _steering, _throttle, dt);
 
     // output for omni frames
-    output_omni(armed, _steering, _throttle, _lateral);
+    //output_omni(armed, _steering, _throttle, _lateral);
+            counter++;
+    /*
+    if (counter > 50) {
+        counter = 0;
+
+        gcs().send_text(MAV_SEVERITY_ERROR, "INTERNAL VARS:  _steering =  %5.3f",_steering);
+        gcs().send_text(MAV_SEVERITY_ERROR, "INTERNAL VARS:  _throttle = %5.3f",_throttle);
+        gcs().send_text(MAV_SEVERITY_ERROR, "INTERNAL VARS:  _lateral = %5.3f",_lateral);
+        gcs().send_text(MAV_SEVERITY_ERROR, "INTERNAL VARS:  _roll = %5.3f",_roll);
+        gcs().send_text(MAV_SEVERITY_ERROR, "INTERNAL VARS:  _pitch = %5.3f",_pitch);
+    }
+    */
+    output_ballbot(armed, _throttle, _steering, _lateral);
 
     // output to sails
     output_sail();
@@ -557,9 +573,9 @@ void AP_MotorsUGV::setup_omni()
 
     case FRAME_TYPE_OMNI3:
         _motors_num = 3;
-        add_omni_motor(0, 1.0f, -1.0f, -1.0f);
-        add_omni_motor(1, 0.0f, -1.0f, 1.0f);
-        add_omni_motor(2, 1.0f, 1.0f, 1.0f);
+        add_ballbot_motor(0, 60);
+        add_ballbot_motor(1, 180);
+        add_ballbot_motor(2, -60);
         break;
 
     case FRAME_TYPE_OMNIX:
@@ -578,6 +594,25 @@ void AP_MotorsUGV::setup_omni()
         add_omni_motor(3, 1.0f, 0.0f, 0.0f);
         break;
     }
+}
+
+// add omni motor using separate throttle, steering and lateral factors
+void AP_MotorsUGV::add_ballbot_motor(int8_t motor_num, int angle_from_forward)
+{
+
+    // ensure valid motor number is provided
+    if (motor_num >= 0 && motor_num < AP_MOTORS_NUM_MOTORS_MAX) {
+
+        // set angle from forward factor
+        _motor_angle[motor_num] = angle_from_forward;
+        _throttle_factor[motor_num] = 1;
+        _steering_factor[motor_num] = 1;
+        _longitudinal_factor[motor_num] = 1;
+        _lateral_factor[motor_num] = 1;
+        add_omni_motor_num(motor_num);
+    }
+    gcs().send_text(MAV_SEVERITY_CRITICAL, "Added new wheel at %d", (int) angle_from_forward);
+
 }
 
 // add omni motor using separate throttle, steering and lateral factors
@@ -823,6 +858,198 @@ void AP_MotorsUGV::output_omni(bool armed, float steering, float throttle, float
     }
 }
 
+// output for ballbot omni frame
+void AP_MotorsUGV::output_ballbot(bool armed, float throttle, float longitudinal, float lateral)
+{
+    // exit immediately if the frame type is set to UNDEFINED
+    if (rover.get_frame_type() == FRAME_TYPE_UNDEFINED) {
+        return;
+    }
+
+    if (armed) {
+        counter++;
+        bool drive = false;
+
+        // clear and set limits based on input
+        set_limits_from_input_ballbot(armed, throttle);
+
+        // scale throttle, longitudinal and lateral inputs to -1 to 1
+        const float scaled_throttle = throttle / 100.0f;
+        const float scaled_longitudinal = longitudinal / 4500.0f; //steering has been mapped to +/-4500
+        const float scaled_lateral = lateral / 100.0f;
+        float desired_heading_rad = 0;
+        float desired_heading_deg = 0;
+
+        // Get a desired angle from the scaled longitudinal and lateral
+        desired_heading_rad =  atan2f(scaled_lateral,scaled_longitudinal);
+        desired_heading_deg = desired_heading_rad * 180 / PI;
+
+        if (desired_heading_deg < 0)
+            desired_heading_deg+=360;
+        if (desired_heading_deg > 180)
+            desired_heading_deg-=360;
+
+        if ((abs(scaled_longitudinal) >= 0.01) || (abs(desired_heading_deg) > 0.01))
+            drive = true;
+
+        float thr_str_ltr_out;
+        float thr_str_ltr_max = 1;
+        float scaled_heading[3] = { 0.0 };
+        if (drive){
+            if (counter > 50) {
+                counter = 0;
+                gcs().send_text(MAV_SEVERITY_CRITICAL, "desired heading is: %5.3f", desired_heading_deg);
+                gcs().send_text(MAV_SEVERITY_CRITICAL, "throttle is: %5.3f", throttle);
+
+                if (desired_heading_deg >= 0 && desired_heading_deg < 60)
+                {
+                    //M1 = 100%
+                    scaled_heading[0] = 1;
+                    //M2 = 0
+                    scaled_heading[1] = 0;
+                    //M3 = sin(pi/2*((120-theta_diff)/60))
+                    float theta_diff = abs(desired_heading_deg - _motor_angle[2]);
+                    scaled_heading[2] = sinf(PI/2*((120-theta_diff)/60));
+                }
+                else if (desired_heading_deg >= 60 && desired_heading_deg < 120)
+                {
+                    //M1 = 100%
+                    scaled_heading[0] = 1;
+                    //M2 = sin(pi/2*((120-theta_diff)/60))
+                    float theta_diff = abs(desired_heading_deg - _motor_angle[1]);
+                    scaled_heading[1] = sinf(PI/2*((120-theta_diff)/60));
+                    //M3 = 0
+                    scaled_heading[2] = 0;
+                }
+                else if (desired_heading_deg >= 120 && desired_heading_deg <= 180)
+                {
+                    //M1 = sin(pi/2*((120-theta_diff)/60))
+                    float theta_diff = abs(desired_heading_deg - _motor_angle[0]);
+                    scaled_heading[0] = sinf(PI/2*((120-theta_diff)/60));
+                    //M2 = 100%
+                    scaled_heading[1] = 1;
+                    //M3 = 0
+                    scaled_heading[2] = 0;
+                }
+                else if (desired_heading_deg >= -60 && desired_heading_deg < 0)
+                {
+                    //M1 = sin(pi/2*((120-theta_diff)/60))
+                    float theta_diff = abs(desired_heading_deg - _motor_angle[0]);
+                    scaled_heading[0] = sinf(PI/2*((120-theta_diff)/60));
+                    //M2 = 0
+                    scaled_heading[1] = 0;
+                    //M3 = 100%
+                    scaled_heading[2] = 1;
+                }
+                else if (desired_heading_deg >= -120 && desired_heading_deg < -60)
+                {
+                    //M1 = 0
+                    scaled_heading[0] = 0;
+                    //M2 = sin(pi/2*((120-theta_diff)/60))
+                    float theta_diff = abs(desired_heading_deg - _motor_angle[1]);
+                    scaled_heading[1] = sinf(PI/2*((120-theta_diff)/60));
+                    //M3 = 100%
+                    scaled_heading[2] = 1;
+                }
+                else if (desired_heading_deg >= -180 && desired_heading_deg < -120)
+                {
+                    //M1 = 0
+                    scaled_heading[0] = 0;
+                    //M2 = 100%
+                    scaled_heading[1] = 1;
+                    //M3 = sin(pi/2*((120-theta_diff)/60))
+                    float theta_diff = abs(desired_heading_deg - _motor_angle[2]);
+                    scaled_heading[2] = sinf(PI/2*((120-theta_diff)/60));
+                }
+                else
+                {
+                    gcs().send_text(MAV_SEVERITY_CRITICAL, "Invalid Angle: %5.3f", desired_heading_deg);
+                }
+
+                for (uint8_t i=0; i<=2; i++)
+                {
+                    //if (scaled_heading[i] > 0.01){
+
+                        gcs().send_text(MAV_SEVERITY_CRITICAL, "motor_num is: %d", i);
+                        gcs().send_text(MAV_SEVERITY_CRITICAL, "scaled_throttle is: %5.3f", scaled_throttle);
+                        gcs().send_text(MAV_SEVERITY_CRITICAL, "scaled_heading: %5.3f", scaled_heading[i]);
+
+                        thr_str_ltr_out =  ((scaled_throttle) * (scaled_heading[i]));
+
+                        // /gcs().send_text(MAV_SEVERITY_CRITICAL, "thr_str_ltr_out is: %5.3f", thr_str_ltr_out);
+
+                        if (fabsf(thr_str_ltr_out) > thr_str_ltr_max) {
+                            thr_str_ltr_max = fabsf(thr_str_ltr_out);
+                        }
+
+                        float output_vectored = (thr_str_ltr_out / thr_str_ltr_max);
+
+                        gcs().send_text(MAV_SEVERITY_CRITICAL, "output_vectoredis: %5.3f", output_vectored);
+
+                        // send output for each motor
+                        output_throttle(SRV_Channels::get_motor_function(i), 100.0f * output_vectored);
+                    //}
+                }
+
+                /*
+                for (uint8_t i=0; i<=2; i++)
+                {
+                    if ((desired_heading_deg <= _motor_angle[i] + 120) && (desired_heading_deg >= _motor_angle[i] - 120))
+                    {
+                        gcs().send_text(MAV_SEVERITY_CRITICAL, "_motor_angle[i]: %d", _motor_angle[i]);
+
+                        if ((desired_heading_deg <= _motor_angle[i] + 60) && (desired_heading_deg >= _motor_angle[i] - 60))
+                        {
+                            gcs().send_text(MAV_SEVERITY_CRITICAL, "Sending 100 to motor %d", i);
+
+                            scaled_heading = 1;
+                        }
+                        else
+                        {
+                            float heading_delta = abs(desired_heading_deg- _motor_angle[i]);
+                            if (heading_delta > 120)
+                                heading_delta -= 180;
+                            else if (heading_delta < -120)
+                                heading_delta += 180;
+
+                            gcs().send_text(MAV_SEVERITY_CRITICAL, "heading_delta %f", heading_delta);
+
+                            scaled_heading = sinf(PI/4*((120-heading_delta)/60));
+
+                            gcs().send_text(MAV_SEVERITY_CRITICAL, "Sending %5.3f to motor %d", scaled_heading, i);
+
+                        }
+
+                        thr_str_ltr_out =  (scaled_throttle * _throttle_factor[i]) +
+                                            (scaled_heading);
+
+                        if (fabsf(thr_str_ltr_out) > thr_str_ltr_max) {
+                            thr_str_ltr_max = fabsf(thr_str_ltr_out);
+                        }
+
+                        float output_vectored = (thr_str_ltr_out / thr_str_ltr_max);
+
+                        // send output for each motor
+                        output_throttle(SRV_Channels::get_motor_function(i), 100.0f * output_vectored);
+                    }
+                }
+                */
+            }
+        }
+    } else {
+        // handle disarmed case
+        if (_disarm_disable_pwm) {
+            for (uint8_t i=0; i<_motors_num; i++) {
+                SRV_Channels::set_output_limit(SRV_Channels::get_motor_function(i), SRV_Channel::Limit::ZERO_PWM);
+            }
+        } else {
+            for (uint8_t i=0; i<_motors_num; i++) {
+                SRV_Channels::set_output_limit(SRV_Channels::get_motor_function(i), SRV_Channel::Limit::TRIM);
+            }
+        }
+    }
+}
+
 // output throttle value to main throttle channel, left throttle or right throttle.  throttle should be scaled from -100 to 100
 void AP_MotorsUGV::output_throttle(SRV_Channel::Aux_servo_function_t function, float throttle, float dt)
 {
@@ -921,6 +1148,14 @@ void AP_MotorsUGV::set_limits_from_input(bool armed, float steering, float throt
     // set limits based on inputs
     limit.steer_left = !armed || (steering <= -4500.0f);
     limit.steer_right = !armed || (steering >= 4500.0f);
+    limit.throttle_lower = !armed || (throttle <= -_throttle_max);
+    limit.throttle_upper = !armed || (throttle >= _throttle_max);
+}
+
+// set limits based on throttle, long and lat
+void AP_MotorsUGV::set_limits_from_input_ballbot(bool armed, float throttle)
+{
+    // set limits based on inputs
     limit.throttle_lower = !armed || (throttle <= -_throttle_max);
     limit.throttle_upper = !armed || (throttle >= _throttle_max);
 }
